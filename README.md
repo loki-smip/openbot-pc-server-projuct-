@@ -469,7 +469,6 @@ Applied during training to improve generalization:
 openbot-pc-server-project/
 │
 ├── README.md                  ← You are here
-├── huggingface.md             ← Hugging Face model card
 │
 ├── firmware_esp8266/
 │   └── esp8266_car/
