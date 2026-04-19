@@ -57,7 +57,7 @@ class DataCollector:
         self._csv_path = os.path.join(self._session_dir, "data.csv")
         self._csv_file = open(self._csv_path, "w", newline="")
         self._csv_writer = csv.writer(self._csv_file)
-        self._csv_writer.writerow(["timestamp", "image_path", "left", "right"])
+        self._csv_writer.writerow(["timestamp", "image_path", "left", "right", "servo"])
 
         self._frame_count = 0
         self._recording = True
@@ -154,6 +154,7 @@ class DataCollector:
                         f"images/{img_filename}",
                         cmd["left"],
                         cmd["right"],
+                        cmd.get("servo", 90),
                     ])
                     self._csv_file.flush()
 

@@ -27,6 +27,10 @@ SERVO_MIN = 0
 SERVO_MAX = 180
 SERVO_CENTER = 90
 
+# Discrete servo tilt positions for the AI model (9 buckets, 0°→180°)
+SERVO_POSITIONS = [0, 22, 45, 67, 90, 112, 135, 157, 180]
+NUM_SERVO_POSITIONS = len(SERVO_POSITIONS)
+
 # ─── Paths ─────────────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATASETS_DIR = os.path.join(BASE_DIR, "datasets")

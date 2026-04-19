@@ -1,7 +1,10 @@
 """
-Training pipeline for ActionNet (classification).
-Since WASD keyboard produces discrete commands, we classify images into actions.
-CrossEntropyLoss is the correct loss for this — not MSE/SmoothL1.
+Training pipeline for ActionNet (dual-head classification).
+Since WASD keyboard produces discrete commands, we classify images into:
+  - Motor actions (9 classes): stop, forward, backward, left, right, etc.
+  - Servo tilt positions (9 classes): 0° to 180° in ~22° steps
+
+Two CrossEntropyLoss terms (motor + servo) are summed.
 """
 import csv
 import os
@@ -20,9 +23,14 @@ from config import (
     DATASETS_DIR, MODELS_DIR,
     MODEL_INPUT_WIDTH, MODEL_INPUT_HEIGHT,
     DEFAULT_BATCH_SIZE, DEFAULT_EPOCHS, DEFAULT_LEARNING_RATE,
-    TRAIN_VAL_SPLIT,
+    TRAIN_VAL_SPLIT, SERVO_POSITIONS, NUM_SERVO_POSITIONS,
 )
-from model import ActionNet, command_to_action, action_to_command, NUM_ACTIONS, ACTION_TABLE
+from model import (
+    ActionNet, command_to_action, action_to_command,
+    servo_to_class, class_to_servo,
+    NUM_MOTOR_ACTIONS, MOTOR_ACTION_TABLE,
+    NUM_ACTIONS, ACTION_TABLE,
+)
 
 
 # ─── Image Preprocessing ──────────────────────────────────────
@@ -56,8 +64,9 @@ def random_brightness(img):
 
 
 # ─── Mirror augmentation action mapping ───────────────────────
-# When we flip an image horizontally, left/right swap
-MIRROR_ACTION = {
+# When we flip an image horizontally, left/right motor actions swap
+# Servo tilt (up/down) does NOT swap on horizontal flip
+MIRROR_MOTOR_ACTION = {
     0: 0,  # STOP stays STOP
     1: 1,  # FORWARD stays FORWARD
     2: 2,  # BACKWARD stays BACKWARD
@@ -69,13 +78,16 @@ MIRROR_ACTION = {
     8: 7,  # BWD+RIGHT becomes BWD+LEFT
 }
 
+# Backward compat alias
+MIRROR_ACTION = MIRROR_MOTOR_ACTION
+
 
 # ─── Custom Dataset ────────────────────────────────────────────
 class DrivingDataset(Dataset):
-    """Classification dataset: image -> action class."""
+    """Dual-head classification dataset: image -> (motor_action, servo_class)."""
 
     def __init__(self, sessions: list, augment=False):
-        self.samples = []  # (image_path, action_class)
+        self.samples = []  # (image_path, motor_action, servo_class)
         self.augment = augment
 
         for session_dir in sessions:
@@ -85,7 +97,6 @@ class DrivingDataset(Dataset):
 
             with open(csv_path, "r") as f:
                 reader = csv.DictReader(f)
-                prev_path = None
                 for row in reader:
                     img_path = os.path.join(session_dir, row["image_path"])
                     if not os.path.isfile(img_path):
@@ -93,18 +104,29 @@ class DrivingDataset(Dataset):
 
                     left = float(row["left"])
                     right = float(row["right"])
+                    # Backward compat: old CSVs may lack 'servo' column
+                    servo_angle = float(row.get("servo", 90))
 
-                    # Map continuous command to discrete action
-                    action = command_to_action(left, right)
-                    self.samples.append((img_path, action))
+                    # Map continuous commands to discrete classes
+                    motor_action = command_to_action(left, right)
+                    servo_class = servo_to_class(servo_angle)
+                    self.samples.append((img_path, motor_action, servo_class))
 
         # Count per class
-        class_counts = Counter(a for _, a in self.samples)
+        motor_counts = Counter(m for _, m, _ in self.samples)
+        servo_counts = Counter(s for _, _, s in self.samples)
+
         print(f"[Dataset] {len(self.samples)} samples, {len(sessions)} session(s)")
-        for i in range(NUM_ACTIONS):
-            cnt = class_counts.get(i, 0)
-            l, r = ACTION_TABLE[i]
-            print(f"  Action {i} (L:{l:+4d} R:{r:+4d}): {cnt:5d} ({100*cnt/max(len(self.samples),1):.1f}%)")
+        print(f"  Motor actions ({NUM_MOTOR_ACTIONS} classes):")
+        for i in range(NUM_MOTOR_ACTIONS):
+            cnt = motor_counts.get(i, 0)
+            l, r = MOTOR_ACTION_TABLE[i]
+            print(f"    Action {i} (L:{l:+4d} R:{r:+4d}): {cnt:5d} ({100*cnt/max(len(self.samples),1):.1f}%)")
+        print(f"  Servo positions ({NUM_SERVO_POSITIONS} classes):")
+        for i in range(NUM_SERVO_POSITIONS):
+            cnt = servo_counts.get(i, 0)
+            angle = SERVO_POSITIONS[i]
+            print(f"    Class {i} ({angle:3d}°): {cnt:5d} ({100*cnt/max(len(self.samples),1):.1f}%)")
 
         self.to_tensor = transforms.ToTensor()
 
@@ -112,32 +134,33 @@ class DrivingDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        img_path, action = self.samples[idx]
+        img_path, motor_action, servo_class = self.samples[idx]
 
         img = cv2.imread(img_path)
         if img is None:
             img = np.zeros((MODEL_INPUT_HEIGHT, MODEL_INPUT_WIDTH, 3), dtype=np.uint8)
-            action = 0
+            motor_action = 0
+            servo_class = servo_to_class(90)
         else:
             img = crop_and_resize(img)
 
         # ── Augmentation (AGGRESSIVE to fight overfitting) ──
         if self.augment:
-            # Horizontal flip (swap left/right actions)
+            # Horizontal flip (swap left/right motor actions, keep servo tilt)
             if random.random() > 0.5:
                 img = np.fliplr(img).copy()
-                action = MIRROR_ACTION.get(action, action)
+                motor_action = MIRROR_MOTOR_ACTION.get(motor_action, motor_action)
+                # Servo tilt (up/down) stays the same on horizontal flip
 
-            # ALWAYS apply at least one photometric transform
-            # Random shadow (50% → was 40%)
+            # Random shadow (50%)
             if random.random() > 0.5:
                 img = add_random_shadow(img)
 
-            # Random brightness (50% → was 40%)
+            # Random brightness (50%)
             if random.random() > 0.5:
                 img = random_brightness(img)
 
-            # Gaussian blur (30% → was 15%)
+            # Gaussian blur (30%)
             if random.random() > 0.7:
                 ksize = random.choice([3, 5])
                 img = cv2.GaussianBlur(img, (ksize, ksize), 0)
@@ -160,15 +183,16 @@ class DrivingDataset(Dataset):
             ey = random.randint(0, th - eh)
             ex = random.randint(0, tw - ew)
             img_tensor[:, ey:ey+eh, ex:ex+ew] = 0.0
-        return img_tensor, action
 
-    def get_class_weights(self):
-        """Compute inverse-frequency weights for balanced sampling."""
-        counts = Counter(a for _, a in self.samples)
+        return img_tensor, motor_action, servo_class
+
+    def get_motor_class_weights(self):
+        """Compute inverse-frequency weights for balanced motor action sampling."""
+        counts = Counter(m for _, m, _ in self.samples)
         total = len(self.samples)
         weights = []
-        for _, action in self.samples:
-            w = total / (NUM_ACTIONS * max(counts[action], 1))
+        for _, motor_action, _ in self.samples:
+            w = total / (NUM_MOTOR_ACTIONS * max(counts[motor_action], 1))
             weights.append(w)
         return weights
 
@@ -240,8 +264,8 @@ class Trainer:
             val_size = len(full_dataset) - train_size
             train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
 
-            # Weighted sampling to balance classes (critical for STOP-heavy data)
-            all_weights = full_dataset.get_class_weights()
+            # Weighted sampling to balance motor classes (critical for STOP-heavy data)
+            all_weights = full_dataset.get_motor_class_weights()
             train_weights = [all_weights[i] for i in train_dataset.indices]
             sampler = WeightedRandomSampler(train_weights, len(train_weights), replacement=True)
 
@@ -253,7 +277,10 @@ class Trainer:
                 val_dataset, batch_size=batch_size, shuffle=False, num_workers=0
             )
 
-            self._progress["message"] = f"Dataset: {len(full_dataset)} ({train_size} train, {val_size} val) | {NUM_ACTIONS} actions"
+            self._progress["message"] = (
+                f"Dataset: {len(full_dataset)} ({train_size} train, {val_size} val) "
+                f"| {NUM_MOTOR_ACTIONS} motor actions, {NUM_SERVO_POSITIONS} servo positions"
+            )
             print(f"[Trainer] Dataset: {len(full_dataset)} ({train_size} train, {val_size} val)")
 
             # Create model
@@ -261,7 +288,8 @@ class Trainer:
             print(f"[Trainer] Device: {device}")
             model = ActionNet().to(device)
             param_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
-            print(f"[Trainer] ActionNet: {param_count:,} params, {NUM_ACTIONS} actions")
+            print(f"[Trainer] ActionNet (dual-head): {param_count:,} params")
+            print(f"[Trainer]   Motor: {NUM_MOTOR_ACTIONS} actions, Servo: {NUM_SERVO_POSITIONS} positions")
 
             optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=5e-3)
 
@@ -274,8 +302,9 @@ class Trainer:
                 div_factor=10, final_div_factor=100,
             )
 
-            # CrossEntropyLoss for classification
-            criterion = nn.CrossEntropyLoss(label_smoothing=0.2)
+            # CrossEntropyLoss for both heads
+            motor_criterion = nn.CrossEntropyLoss(label_smoothing=0.2)
+            servo_criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
 
             best_val_loss = float("inf")
             best_val_acc = 0.0
@@ -292,16 +321,22 @@ class Trainer:
                 # ── Train ──
                 model.train()
                 train_loss_sum = 0.0
-                train_correct = 0
+                train_motor_correct = 0
+                train_servo_correct = 0
                 train_count = 0
 
-                for images, labels in train_loader:
+                for images, motor_labels, servo_labels in train_loader:
                     images = images.to(device)
-                    labels = labels.to(device)
+                    motor_labels = motor_labels.to(device)
+                    servo_labels = servo_labels.to(device)
 
                     optimizer.zero_grad()
-                    logits = model(images)
-                    loss = criterion(logits, labels)
+                    motor_logits, servo_logits = model(images)
+
+                    motor_loss = motor_criterion(motor_logits, motor_labels)
+                    servo_loss = servo_criterion(servo_logits, servo_labels)
+                    loss = motor_loss + servo_loss
+
                     loss.backward()
 
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -309,49 +344,69 @@ class Trainer:
                     scheduler.step()
 
                     train_loss_sum += loss.item() * images.size(0)
-                    preds = torch.argmax(logits, dim=1)
-                    train_correct += (preds == labels).sum().item()
+                    motor_preds = torch.argmax(motor_logits, dim=1)
+                    servo_preds = torch.argmax(servo_logits, dim=1)
+                    train_motor_correct += (motor_preds == motor_labels).sum().item()
+                    train_servo_correct += (servo_preds == servo_labels).sum().item()
                     train_count += images.size(0)
 
                 train_loss = train_loss_sum / max(train_count, 1)
-                train_acc = train_correct / max(train_count, 1)
+                train_motor_acc = train_motor_correct / max(train_count, 1)
+                train_servo_acc = train_servo_correct / max(train_count, 1)
 
                 # ── Validate ──
                 model.eval()
                 val_loss_sum = 0.0
-                val_correct = 0
+                val_motor_correct = 0
+                val_servo_correct = 0
                 val_count = 0
 
                 with torch.no_grad():
-                    for images, labels in val_loader:
+                    for images, motor_labels, servo_labels in val_loader:
                         images = images.to(device)
-                        labels = labels.to(device)
+                        motor_labels = motor_labels.to(device)
+                        servo_labels = servo_labels.to(device)
 
-                        logits = model(images)
-                        loss = criterion(logits, labels)
+                        motor_logits, servo_logits = model(images)
+                        motor_loss = motor_criterion(motor_logits, motor_labels)
+                        servo_loss = servo_criterion(servo_logits, servo_labels)
+                        loss = motor_loss + servo_loss
 
                         val_loss_sum += loss.item() * images.size(0)
-                        preds = torch.argmax(logits, dim=1)
-                        val_correct += (preds == labels).sum().item()
+                        motor_preds = torch.argmax(motor_logits, dim=1)
+                        servo_preds = torch.argmax(servo_logits, dim=1)
+                        val_motor_correct += (motor_preds == motor_labels).sum().item()
+                        val_servo_correct += (servo_preds == servo_labels).sum().item()
                         val_count += images.size(0)
 
                 val_loss = val_loss_sum / max(val_count, 1)
-                val_acc = val_correct / max(val_count, 1)
+                val_motor_acc = val_motor_correct / max(val_count, 1)
+                val_servo_acc = val_servo_correct / max(val_count, 1)
 
-                # Save best model (by accuracy)
-                is_best = val_acc > best_val_acc
+                # Combined accuracy (average of motor + servo)
+                val_combined_acc = (val_motor_acc + val_servo_acc) / 2.0
+
+                # Save best model (by combined accuracy)
+                is_best = val_combined_acc > best_val_acc
                 if is_best:
-                    best_val_acc = val_acc
+                    best_val_acc = val_combined_acc
                     best_val_loss = val_loss
                     patience_counter = 0
                     torch.save({
                         "model_state_dict": model.state_dict(),
                         "epoch": epoch,
                         "val_loss": val_loss,
-                        "val_acc": val_acc,
-                        "num_actions": NUM_ACTIONS,
-                        "action_table": ACTION_TABLE,
+                        "val_acc": val_combined_acc,
+                        "val_motor_acc": val_motor_acc,
+                        "val_servo_acc": val_servo_acc,
+                        "num_motor_actions": NUM_MOTOR_ACTIONS,
+                        "num_servo_positions": NUM_SERVO_POSITIONS,
+                        "motor_action_table": MOTOR_ACTION_TABLE,
+                        "servo_positions": SERVO_POSITIONS,
                         "input_size": (MODEL_INPUT_HEIGHT, MODEL_INPUT_WIDTH),
+                        # Backward compat
+                        "num_actions": NUM_MOTOR_ACTIONS,
+                        "action_table": MOTOR_ACTION_TABLE,
                     }, save_path)
                 else:
                     patience_counter += 1
@@ -364,11 +419,21 @@ class Trainer:
                     "val_loss": round(val_loss, 4),
                     "best_val_loss": round(best_val_loss, 4),
                     "progress_pct": int(epoch / epochs * 100),
-                    "message": f"Epoch {epoch}/{epochs} | Acc: {100*val_acc:.1f}% | Loss: {val_loss:.4f}",
+                    "message": (
+                        f"Epoch {epoch}/{epochs} | "
+                        f"Motor: {100*val_motor_acc:.1f}% | "
+                        f"Servo: {100*val_servo_acc:.1f}% | "
+                        f"Loss: {val_loss:.4f}"
+                    ),
                 })
 
-                print(f"[Trainer] Epoch {epoch}/{epochs} | Train: {100*train_acc:.1f}% ({train_loss:.4f}) | Val: {100*val_acc:.1f}% ({val_loss:.4f}) | LR: {current_lr:.6f}" +
-                      (f" ** BEST {100*val_acc:.1f}%" if is_best else f" (pat {patience_counter}/{early_stop_patience})"))
+                print(
+                    f"[Trainer] Epoch {epoch}/{epochs} | "
+                    f"Train Motor: {100*train_motor_acc:.1f}% Servo: {100*train_servo_acc:.1f}% ({train_loss:.4f}) | "
+                    f"Val Motor: {100*val_motor_acc:.1f}% Servo: {100*val_servo_acc:.1f}% ({val_loss:.4f}) | "
+                    f"LR: {current_lr:.6f}" +
+                    (f" ** BEST {100*val_combined_acc:.1f}%" if is_best else f" (pat {patience_counter}/{early_stop_patience})")
+                )
 
                 if patience_counter >= early_stop_patience:
                     print(f"[Trainer] Early stop at epoch {epoch}")
@@ -376,8 +441,10 @@ class Trainer:
 
             self._progress["status"] = "completed"
             self._progress["progress_pct"] = 100
-            self._progress["message"] = f"Done! Best accuracy: {100*best_val_acc:.1f}% (loss: {best_val_loss:.4f})"
-            print(f"[Trainer] Done! Best val accuracy: {100*best_val_acc:.1f}%")
+            self._progress["message"] = (
+                f"Done! Best combined accuracy: {100*best_val_acc:.1f}% (loss: {best_val_loss:.4f})"
+            )
+            print(f"[Trainer] Done! Best combined accuracy: {100*best_val_acc:.1f}%")
 
         except Exception as e:
             self._progress["status"] = "error"

@@ -1,6 +1,6 @@
 """
-Autopilot v3 — Classification-based inference.
-Predicts discrete action (stop/forward/left/right/etc) and maps to motor command.
+Autopilot v4 — Dual-head classification inference.
+Predicts discrete motor action + servo tilt position from camera frame.
 """
 import threading
 import time
@@ -13,17 +13,23 @@ from torchvision import transforms
 
 from config import (
     MODELS_DIR, MODEL_INPUT_WIDTH, MODEL_INPUT_HEIGHT,
-    AUTOPILOT_FPS, DEFAULT_DRIVE_SPEED
+    AUTOPILOT_FPS, DEFAULT_DRIVE_SPEED, SERVO_POSITIONS,
 )
-from model import ActionNet, action_to_command, NUM_ACTIONS, ACTION_TABLE
+from model import (
+    ActionNet, action_to_command, class_to_servo,
+    NUM_MOTOR_ACTIONS, NUM_SERVO_POSITIONS,
+)
 from trainer import crop_and_resize
 
 
-# Action names for display
-ACTION_NAMES = [
+# Motor action names for display
+MOTOR_ACTION_NAMES = [
     "STOP", "FWD", "BWD", "LEFT", "RIGHT",
     "FWD+L", "FWD+R", "BWD+L", "BWD+R"
 ]
+
+# Backward compat alias
+ACTION_NAMES = MOTOR_ACTION_NAMES
 
 
 class Autopilot:
@@ -37,6 +43,7 @@ class Autopilot:
         self._model_name = ""
         self._inference_fps = 0.0
         self._last_prediction = [0.0, 0.0]
+        self._last_servo = 90
         self._last_action = "—"
         self._speed = DEFAULT_DRIVE_SPEED
         self._to_tensor = transforms.ToTensor()
@@ -56,6 +63,14 @@ class Autopilot:
     @property
     def last_prediction(self):
         return self._last_prediction.copy()
+
+    @property
+    def last_servo(self):
+        return self._last_servo
+
+    @property
+    def last_action(self):
+        return self._last_action
 
     def start(self, model_name: str, speed: int = None):
         if self._running:
@@ -79,8 +94,12 @@ class Autopilot:
 
             self._model_name = model_name
             val_acc = checkpoint.get('val_acc', '?')
+            motor_acc = checkpoint.get('val_motor_acc', '?')
+            servo_acc = checkpoint.get('val_servo_acc', '?')
             acc_str = f"{100*val_acc:.1f}%" if isinstance(val_acc, float) else val_acc
-            print(f"[Autopilot] Model loaded: {model_name} (accuracy: {acc_str})")
+            print(f"[Autopilot] Model loaded: {model_name} (combined: {acc_str})")
+            if isinstance(motor_acc, float) and isinstance(servo_acc, float):
+                print(f"[Autopilot]   Motor acc: {100*motor_acc:.1f}%, Servo acc: {100*servo_acc:.1f}%")
 
         except Exception as e:
             return {"error": f"Failed to load model: {e}"}
@@ -98,8 +117,9 @@ class Autopilot:
         if self._thread:
             self._thread.join(timeout=2)
 
-        self.car.send_command(0, 0)
+        self.car.send_command(0, 0, 90)  # Stop motors, center servo
         self._last_prediction = [0.0, 0.0]
+        self._last_servo = 90
         self._last_action = "—"
 
         result = {"status": "stopped", "model": self._model_name}
@@ -111,10 +131,10 @@ class Autopilot:
         fps_timer = time.time()
         fps_count = 0
 
-        # Smoothing: require N consecutive same predictions to change action
-        prev_action = 0
-        action_votes = []
-        vote_window = 3  # Majority vote over last 3 frames
+        # Smoothing: majority vote over last N frames
+        motor_votes = []
+        servo_votes = []
+        vote_window = 3
 
         print(f"[Autopilot] Autonomous mode ACTIVE | Speed: {self._speed} | {AUTOPILOT_FPS} FPS")
 
@@ -130,33 +150,39 @@ class Autopilot:
             preprocessed = crop_and_resize(frame)
             img_tensor = self._to_tensor(preprocessed).unsqueeze(0).to(self._device)
 
-            # Inference
+            # Inference — dual head
             with torch.no_grad():
-                logits = self._model(img_tensor)
-                probs = F.softmax(logits, dim=1)
-                predicted_action = torch.argmax(probs, dim=1).item()
-                confidence = probs[0, predicted_action].item()
+                motor_logits, servo_logits = self._model(img_tensor)
+                motor_probs = F.softmax(motor_logits, dim=1)
+                servo_probs = F.softmax(servo_logits, dim=1)
+                predicted_motor = torch.argmax(motor_probs, dim=1).item()
+                predicted_servo = torch.argmax(servo_probs, dim=1).item()
+                motor_confidence = motor_probs[0, predicted_motor].item()
 
             # Majority vote smoothing (prevents flickering)
-            action_votes.append(predicted_action)
-            if len(action_votes) > vote_window:
-                action_votes.pop(0)
+            motor_votes.append(predicted_motor)
+            servo_votes.append(predicted_servo)
+            if len(motor_votes) > vote_window:
+                motor_votes.pop(0)
+            if len(servo_votes) > vote_window:
+                servo_votes.pop(0)
 
-            # Use most common action in the vote window
             from collections import Counter
-            vote_counts = Counter(action_votes)
-            smoothed_action = vote_counts.most_common(1)[0][0]
+            smoothed_motor = Counter(motor_votes).most_common(1)[0][0]
+            smoothed_servo = Counter(servo_votes).most_common(1)[0][0]
 
-            # Convert to motor command at current speed
-            left, right = action_to_command(smoothed_action, self._speed)
+            # Convert to commands
+            left, right = action_to_command(smoothed_motor, self._speed)
+            servo_angle = class_to_servo(smoothed_servo)
 
             # Update state
-            action_name = ACTION_NAMES[smoothed_action] if smoothed_action < len(ACTION_NAMES) else f"A{smoothed_action}"
-            self._last_action = f"{action_name} ({100*confidence:.0f}%)"
+            action_name = MOTOR_ACTION_NAMES[smoothed_motor] if smoothed_motor < len(MOTOR_ACTION_NAMES) else f"A{smoothed_motor}"
+            self._last_action = f"{action_name} ({100*motor_confidence:.0f}%)"
             self._last_prediction = [left / 100.0, right / 100.0]
+            self._last_servo = servo_angle
 
-            # Send to car
-            self.car.send_command(left, right)
+            # Send to car — motor + servo
+            self.car.send_command(left, right, servo_angle)
 
             # FPS tracking
             fps_count += 1
@@ -170,4 +196,4 @@ class Autopilot:
                 time.sleep(interval - elapsed)
 
         print("[Autopilot] Stopped")
-        self.car.send_command(0, 0)
+        self.car.send_command(0, 0, 90)

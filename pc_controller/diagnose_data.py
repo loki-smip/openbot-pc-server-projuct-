@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 from collections import Counter
 
-from config import DATASETS_DIR, MODEL_INPUT_WIDTH, MODEL_INPUT_HEIGHT
+from config import DATASETS_DIR, MODEL_INPUT_WIDTH, MODEL_INPUT_HEIGHT, SERVO_POSITIONS
 from trainer import crop_and_resize
 
 def analyze_dataset(dataset_dir):
@@ -20,6 +20,7 @@ def analyze_dataset(dataset_dir):
 
     lefts = []
     rights = []
+    servos = []
     rows = []
 
     with open(csv_path, "r") as f:
@@ -27,12 +28,15 @@ def analyze_dataset(dataset_dir):
         for row in reader:
             left = float(row["left"])
             right = float(row["right"])
+            servo = float(row.get("servo", 90))  # backward compat
             lefts.append(left)
             rights.append(right)
+            servos.append(servo)
             rows.append(row)
 
     lefts = np.array(lefts)
     rights = np.array(rights)
+    servos = np.array(servos)
 
     total = len(lefts)
     print(f"  Total frames: {total}")
@@ -45,7 +49,7 @@ def analyze_dataset(dataset_dir):
     turn_left = np.sum((rights - lefts) > 15)
     turn_right = np.sum((lefts - rights) > 15)
 
-    print(f"  === COMMAND DISTRIBUTION ===")
+    print(f"  === MOTOR COMMAND DISTRIBUTION ===")
     print(f"  Idle (both ~0):    {idle:4d} ({100*idle/total:.1f}%)")
     print(f"  Forward:           {forward:4d} ({100*forward/total:.1f}%)")
     print(f"  Backward:          {backward:4d} ({100*backward/total:.1f}%)")
@@ -55,8 +59,20 @@ def analyze_dataset(dataset_dir):
     print(f"  Mixed/Other:       {other:4d} ({100*other/total:.1f}%)")
     print()
 
+    # ── Servo Tilt Distribution ──
+    print(f"  === SERVO TILT DISTRIBUTION ===")
+    # Bucket servo angles into the 9 positions
+    from model import servo_to_class
+    servo_classes = [servo_to_class(s) for s in servos]
+    servo_counts = Counter(servo_classes)
+    for i, pos in enumerate(SERVO_POSITIONS):
+        cnt = servo_counts.get(i, 0)
+        print(f"  Class {i} ({pos:3d}°): {cnt:5d} ({100*cnt/total:.1f}%)")
+    print(f"  Raw range: min={servos.min():.0f}° max={servos.max():.0f}° mean={servos.mean():.1f}° std={servos.std():.1f}°")
+    print()
+
     # ── Value Ranges ──
-    print(f"  === VALUE RANGES ===")
+    print(f"  === MOTOR VALUE RANGES ===")
     print(f"  Left motor:  min={lefts.min():.0f}  max={lefts.max():.0f}  mean={lefts.mean():.1f}  std={lefts.std():.1f}")
     print(f"  Right motor: min={rights.min():.0f}  max={rights.max():.0f}  mean={rights.mean():.1f}  std={rights.std():.1f}")
     print()
@@ -72,8 +88,10 @@ def analyze_dataset(dataset_dir):
             same_cmd_streak = 0
 
     unique_cmds = len(set(zip(lefts.tolist(), rights.tolist())))
+    unique_servo_vals = len(set(servos.tolist()))
     print(f"  === DIVERSITY ===")
-    print(f"  Unique command pairs: {unique_cmds}")
+    print(f"  Unique motor command pairs: {unique_cmds}")
+    print(f"  Unique servo values: {unique_servo_vals}")
     print(f"  Longest same-command streak: {max_streak} frames")
     print()
 
@@ -102,6 +120,13 @@ def analyze_dataset(dataset_dir):
     if total < 1500:
         problems.append(f"SMALL DATASET ({total} frames) - need at least 3000+ for decent training")
 
+    # Servo-specific checks
+    if servos.std() < 5:
+        problems.append(f"SERVO NEVER MOVED (std={servos.std():.1f}°) - model can't learn tilt control")
+
+    if unique_servo_vals < 3:
+        problems.append(f"TOO FEW SERVO VALUES ({unique_servo_vals}) - use Q/E keys to vary tilt during recording")
+
     if not problems:
         print("  No obvious problems detected. Data looks reasonable.")
     else:
@@ -125,10 +150,11 @@ def analyze_dataset(dataset_dir):
                     cropped = crop_and_resize(img)
                     cropped_bgr = cv2.cvtColor(cropped, cv2.COLOR_RGB2BGR)
 
-                    # Add command overlay
+                    # Add command overlay with servo
                     l, r = int(float(rows[idx]["left"])), int(float(rows[idx]["right"]))
-                    cv2.putText(cropped_bgr, f"L:{l} R:{r}", (5, 15),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 0), 1)
+                    s = int(float(rows[idx].get("servo", 90)))
+                    cv2.putText(cropped_bgr, f"L:{l} R:{r} S:{s}", (5, 15),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1)
                     grid_imgs.append(cropped_bgr)
 
         if grid_imgs:

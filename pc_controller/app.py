@@ -166,6 +166,8 @@ def autopilot_status():
         "model": pilot.model_name,
         "fps": round(pilot.inference_fps, 1),
         "prediction": pilot.last_prediction,
+        "servo": pilot.last_servo,
+        "action": pilot.last_action,
     })
 
 

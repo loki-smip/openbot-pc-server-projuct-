@@ -9,6 +9,8 @@ const state = {
     speed: 70,
     currentLeft: 0,
     currentRight: 0,
+    currentServo: 90,
+    servoStep: 22,  // Match the 9-position bucket spacing (~22° steps)
     controlInterval: null,
     statusInterval: null,
     recordingPollInterval: null,
@@ -19,7 +21,7 @@ const state = {
 // ─── Keyboard Control ─────────────────────────────────────
 document.addEventListener('keydown', (e) => {
     const key = e.key.toLowerCase();
-    if (['w', 'a', 's', 'd', ' '].includes(key)) {
+    if (['w', 'a', 's', 'd', ' ', 'q', 'e'].includes(key)) {
         e.preventDefault();
         if (key === ' ') {
             // Emergency stop
@@ -27,6 +29,20 @@ document.addEventListener('keydown', (e) => {
             state.keys.a = false;
             state.keys.s = false;
             state.keys.d = false;
+            // Reset servo to center
+            state.currentServo = 90;
+            updateServoDisplay();
+            sendServo(90);
+        } else if (key === 'q') {
+            // Tilt up (decrease angle — 0° is fully up)
+            state.currentServo = Math.max(0, state.currentServo - state.servoStep);
+            updateServoDisplay();
+            sendServo(state.currentServo);
+        } else if (key === 'e') {
+            // Tilt down (increase angle — 180° is fully down)
+            state.currentServo = Math.min(180, state.currentServo + state.servoStep);
+            updateServoDisplay();
+            sendServo(state.currentServo);
         } else {
             state.keys[key] = true;
         }
@@ -43,20 +59,29 @@ document.addEventListener('keyup', (e) => {
         highlightKey(key, false);
         updateMotors();
     }
-    if (key === ' ') {
-        highlightKey(' ', false);
+    if (['q', 'e', ' '].includes(key)) {
+        highlightKey(key, false);
     }
 });
 
 function highlightKey(key, active) {
     const kbds = document.querySelectorAll('kbd');
-    const keyMap = { 'w': 'W', 'a': 'A', 's': 'S', 'd': 'D', ' ': 'Space' };
+    const keyMap = { 'w': 'W', 'a': 'A', 's': 'S', 'd': 'D', ' ': 'Space', 'q': 'Q', 'e': 'E' };
     const label = keyMap[key];
     kbds.forEach(kbd => {
         if (kbd.textContent.trim() === label) {
             kbd.classList.toggle('active', active);
         }
     });
+}
+
+function updateServoDisplay() {
+    const slider = document.getElementById('servo-slider');
+    const value = document.getElementById('servo-value');
+    if (slider && value) {
+        slider.value = state.currentServo;
+        value.textContent = state.currentServo + '°';
+    }
 }
 
 function updateMotors() {
@@ -137,6 +162,7 @@ const servoValue = document.getElementById('servo-value');
 
 servoSlider.addEventListener('input', () => {
     const angle = parseInt(servoSlider.value);
+    state.currentServo = angle;
     servoValue.textContent = angle + '°';
     sendServo(angle);
 });
@@ -402,6 +428,7 @@ async function stopAutopilot() {
 
         document.getElementById('ap-fps').textContent = '0';
         document.getElementById('ap-prediction').textContent = '—';
+        document.getElementById('ap-servo').textContent = '90°';
         updateBars(0, 0);
     } catch (err) {
         alert('Failed to stop autopilot: ' + err.message);
@@ -414,8 +441,26 @@ async function pollAutopilotStatus() {
         const data = await res.json();
 
         document.getElementById('ap-fps').textContent = data.fps;
-        document.getElementById('ap-prediction').textContent =
-            `L:${data.prediction[0]} R:${data.prediction[1]}`;
+
+        // Show action name if available, otherwise motor values
+        if (data.action) {
+            document.getElementById('ap-prediction').textContent = data.action;
+        } else {
+            document.getElementById('ap-prediction').textContent =
+                `L:${data.prediction[0]} R:${data.prediction[1]}`;
+        }
+
+        // Show servo tilt angle
+        if (data.servo !== undefined) {
+            document.getElementById('ap-servo').textContent = data.servo + '°';
+            // Sync the servo slider with autopilot output
+            const slider = document.getElementById('servo-slider');
+            const valEl = document.getElementById('servo-value');
+            if (slider && valEl) {
+                slider.value = data.servo;
+                valEl.textContent = data.servo + '°';
+            }
+        }
 
         // Update overlay bars with autopilot prediction
         const left = Math.round(data.prediction[0] * 100);
@@ -488,5 +533,5 @@ document.addEventListener('DOMContentLoaded', () => {
     state.statusInterval = setInterval(pollSystemStatus, 1000);
     pollSystemStatus();
 
-    console.log('🤖 OpenBot PC Controller initialized');
+    console.log('🤖 OpenBot PC Controller initialized (with servo tilt)');
 });
