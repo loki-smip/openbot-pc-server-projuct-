@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenBot PC Controller</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <!-- ─── Header ─────────────────────────────────────────── -->
+    <header id="main-header">
+        <div class="header-left">
+            <div class="logo">
+                <span class="logo-icon">🤖</span>
+                <h1>OpenBot <span class="accent">PC</span></h1>
+            </div>
+            <span class="version-badge">v1.0</span>
+        </div>
+        <div class="header-right">
+            <div class="status-pills">
+                <span id="pill-car" class="pill disconnected">
+                    <span class="dot"></span> Car
+                </span>
+                <span id="pill-camera" class="pill disconnected">
+                    <span class="dot"></span> Camera
+                </span>
+                <span id="pill-fps" class="pill info">
+                    <span class="dot"></span> <span id="cam-fps">0</span> FPS
+                </span>
+            </div>
+        </div>
+    </header>
+
+    <!-- ─── Main Layout ────────────────────────────────────── -->
+    <main id="dashboard">
+        <!-- Left: Camera Feed -->
+        <section id="feed-panel" class="panel glass">
+            <div class="panel-header">
+                <h2>📷 Live Feed</h2>
+                <div id="mode-indicator" class="mode-badge manual">MANUAL</div>
+            </div>
+            <div class="feed-container">
+                <img id="camera-feed" src="/api/video_feed" alt="Camera Feed" />
+                <div id="feed-overlay" class="feed-overlay">
+                    <div id="overlay-left" class="overlay-bar left">
+                        <div class="bar-fill" id="bar-left"></div>
+                        <span class="bar-label" id="label-left">L: 0</span>
+                    </div>
+                    <div id="overlay-right" class="overlay-bar right">
+                        <div class="bar-fill" id="bar-right"></div>
+                        <span class="bar-label" id="label-right">R: 0</span>
+                    </div>
+                </div>
+                <div id="no-camera-msg" class="no-camera">
+                    <span>📡</span>
+                    <p>Waiting for camera feed...</p>
+                </div>
+            </div>
+            <!-- Keyboard Help -->
+            <div class="controls-hint">
+                <div class="key-group">
+                    <kbd>W</kbd><span>Forward</span>
+                    <kbd>S</kbd><span>Backward</span>
+                    <kbd>A</kbd><span>Left</span>
+                    <kbd>D</kbd><span>Right</span>
+                    <kbd>Space</kbd><span>Stop</span>
+                </div>
+                <div class="speed-control">
+                    <label for="speed-slider">Speed</label>
+                    <input type="range" id="speed-slider" min="10" max="100" value="70" />
+                    <span id="speed-value">70</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Right: Control Panels -->
+        <aside id="side-panels">
+            <!-- ── Recording Panel ──────────────────────────── -->
+            <section id="recording-panel" class="panel glass">
+                <div class="panel-header">
+                    <h2>🔴 Data Recording</h2>
+                </div>
+                <div class="panel-body">
+                    <div class="input-row">
+                        <input type="text" id="session-name" placeholder="Session name (auto-generated)" />
+                    </div>
+                    <div class="stats-row">
+                        <div class="stat">
+                            <span class="stat-value" id="rec-frames">0</span>
+                            <span class="stat-label">Frames</span>
+                        </div>
+                        <div class="stat">
+                            <span class="stat-value" id="rec-status">Idle</span>
+                            <span class="stat-label">Status</span>
+                        </div>
+                    </div>
+                    <div class="btn-row">
+                        <button id="btn-rec-start" class="btn btn-danger" onclick="startRecording()">
+                            ⏺ Start Recording
+                        </button>
+                        <button id="btn-rec-stop" class="btn btn-secondary" onclick="stopRecording()" disabled>
+                            ⏹ Stop
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ── Training Panel ──────────────────────────── -->
+            <section id="training-panel" class="panel glass">
+                <div class="panel-header">
+                    <h2>🧠 Model Training</h2>
+                </div>
+                <div class="panel-body">
+                    <div class="input-row">
+                        <select id="train-datasets" multiple size="3">
+                            <!-- Populated dynamically -->
+                        </select>
+                    </div>
+                    <div class="param-grid">
+                        <div class="param">
+                            <label>Epochs</label>
+                            <input type="number" id="train-epochs" value="200" min="1" max="1000" />
+                        </div>
+                        <div class="param">
+                            <label>Batch Size</label>
+                            <input type="number" id="train-batch" value="32" min="1" max="256" />
+                        </div>
+                        <div class="param">
+                            <label>Learning Rate</label>
+                            <input type="number" id="train-lr" value="0.001" step="0.0001" />
+                        </div>
+                        <div class="param">
+                            <label>Model Name</label>
+                            <input type="text" id="train-model-name" value="autopilot" />
+                        </div>
+                    </div>
+                    <!-- Progress -->
+                    <div id="train-progress-section" class="progress-section hidden">
+                        <div class="progress-bar-container">
+                            <div class="progress-bar" id="train-progress-bar">
+                                <span id="train-progress-text">0%</span>
+                            </div>
+                        </div>
+                        <div class="train-stats">
+                            <span id="train-epoch-info">—</span>
+                            <span id="train-loss-info">—</span>
+                        </div>
+                        <p id="train-message" class="train-message"></p>
+                    </div>
+                    <div class="btn-row">
+                        <button id="btn-train" class="btn btn-primary" onclick="startTraining()">
+                            🚀 Train Model
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ── Autopilot Panel ─────────────────────────── -->
+            <section id="autopilot-panel" class="panel glass">
+                <div class="panel-header">
+                    <h2>🚗 Autopilot</h2>
+                </div>
+                <div class="panel-body">
+                    <div class="input-row">
+                        <select id="autopilot-model">
+                            <!-- Populated dynamically -->
+                        </select>
+                    </div>
+                    <div class="stats-row">
+                        <div class="stat">
+                            <span class="stat-value" id="ap-fps">0</span>
+                            <span class="stat-label">Inference FPS</span>
+                        </div>
+                        <div class="stat">
+                            <span class="stat-value" id="ap-prediction">—</span>
+                            <span class="stat-label">Prediction</span>
+                        </div>
+                    </div>
+                    <div class="btn-row">
+                        <button id="btn-ap-start" class="btn btn-accent" onclick="startAutopilot()">
+                            ▶ Start Autopilot
+                        </button>
+                        <button id="btn-ap-stop" class="btn btn-secondary" onclick="stopAutopilot()" disabled>
+                            ⏹ Stop
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ── Servo Panel ─────────────────────────────── -->
+            <section id="servo-panel" class="panel glass compact">
+                <div class="panel-header">
+                    <h2>🎯 Camera Servo</h2>
+                </div>
+                <div class="panel-body">
+                    <div class="servo-control">
+                        <input type="range" id="servo-slider" min="0" max="180" value="90" />
+                        <span id="servo-value">90°</span>
+                    </div>
+                </div>
+            </section>
+        </aside>
+    </main>
+
+    <script src="/static/js/main.js"></script>
+</body>
+</html>
