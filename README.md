@@ -228,8 +228,8 @@ The ESP32-CAM runs the standard **CameraWebServer** example sketch that ships wi
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/YOUR_USERNAME/openbot-pc-server-project.git
-   cd openbot-pc-server-project
+   git clone https://github.com/loki-smip/openbot-pc-server-projuct-.git
+   cd openbot-pc-server-project-
    ```
 
 2. **Install Python dependencies:**
